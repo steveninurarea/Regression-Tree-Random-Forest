@@ -1,0 +1,144 @@
+# Regression Random Forest ------------------------------------------------
+
+library(stringr)
+
+#' reg_rf
+#' Fits a random forest with a continuous scaled features and target 
+#' variable (regression)
+#'
+#' @param formula an object of class formula
+#' @param n_trees an integer specifying the number of trees to sprout
+#' @param feature_frac an numeric value defined between [0,1]
+#'                     specifies the percentage of total features to be used in
+#'                     each regression tree
+#' @param data a data.frame or matrix
+
+reg_rf <- function(formula, n_trees, feature_frac, data, COL, minsize) {
+  
+  # source the regression tree function
+  source("/Covariate-Embedded Regression Tree algorithm.R")
+  
+  # load plyr
+  require(plyr)
+  
+  # coerce to data frame
+  data <- as.data.frame(data)
+  
+  # define function to sprout a single tree
+  sprout_tree <- function(formula, feature_frac, data, COL) {
+    # extract features
+    features <- all.vars(formula)[-c(1,2,3)]
+    
+    # extract target
+    target <- all.vars(formula)[1]
+    
+    # bag the data
+    # - randomly sample the data with replacement (duplicate are possible)
+    # 有放回的隨機抽樣
+    train <-
+      data[sample(1:nrow(data), size = nrow(data), replace = TRUE),]
+    
+    # randomly sample features
+    # - only fit the regression tree with feature_frac * 100 % of the features
+    # 抽樣變數 *feature_frac
+    features_sample <- sample(features,
+                              size = ceiling((length(features)+2) * feature_frac),
+                              replace = FALSE)
+    
+    
+    # create new formula
+    formula_new <-
+      as.formula(paste0(target, " ~ ", paste0(c(all.vars(formula)[COL], features_sample[-c(1,2)]),
+                                              collapse =  " + ")))
+    
+    # fit the regression tree
+    tree <- reg_tree_imp(formula = formula_new,
+                         data = train,
+                         minsize = minsize,
+                         COL)
+    
+    # use tree splitting rules on the original data
+    tree_info <- tree$tree
+    # calculate fitted values
+    leafs <- tree_info[tree_info$TERMINAL == "LEAF", ]
+    fitted <- vector(length=nrow(data))
+    for (i in seq_len(nrow(leafs))) {
+      # extract index
+      ind <- as.numeric(rownames(subset(data, eval(parse(text = leafs[i, "FILTER"])))))
+      # estimator is the mean y value of the leaf
+      fitted[ind] <- mean(data[ind, target])
+    }
+    
+    ##### 有選中的 variables
+    if(length(tree_info$NODE) >1) {
+      f1 <- strsplit(tree_info$FILTER, " & ")
+      f2 <- unlist(f1)
+      f3 <- strsplit(f2, "[[:space:]]")
+      f4 <- unlist(f3)[-1]
+      VAR <- unique(f4[0:(length(f4)/3-1) * 3 + 1])
+      VAR1 <- str_c(VAR, collapse = " & ")    # 字串
+    } else {
+      VAR <- c("SNP1000", "SSSS", "STEVEN")
+      VAR1 <- str_c(VAR, collapse = " & ") 
+    }
+    
+    # save the fit and the importance
+    return(list(F1 = fitted, I = tree$importance, V = VAR, V1 = VAR1, S = features_sample))
+  }
+  
+  # apply the rf_tree function n_trees times with plyr::raply
+  # - track the progress with a progress bar
+  trees <- plyr::raply(
+    n_trees,
+    sprout_tree(
+      formula = formula,
+      feature_frac = feature_frac,
+      data = data,
+      COL
+    ),
+    .progress = "text"
+  )
+  
+  ### count important variables
+  v1 <- do.call("rbind", trees[, 4])
+  v2 <- strsplit(v1, " & ")
+  v3 <- unlist(v2)
+  
+  ### count bag variables
+  b1 <- do.call("rbind", trees[, 5])
+  b2 <- strsplit(b1, " & ")
+  b3 <- unlist(b2)
+  
+  imprf <- data.frame(FEATURES = NA, IMPORTANCE = NA)
+  #imprf[1, "FEATURES"] <- "age"
+  #imprf[1, "IMPORTANCE"] <- 1
+  
+  #imprf[2, "FEATURES"] <- "gender"
+  #imprf[2, "IMPORTANCE"] <- 1
+  
+  SNP_list <- names(D)
+  for(i in 1:length(SNP_list)){
+    imprf[i, "FEATURES"] <- SNP_list[i]
+    imprf[i, "IMPORTANCE"] <- sum(v3 == SNP_list[i]) / sum(b3 == SNP_list[i])
+  }
+  
+  # extract fit
+  fits <- do.call("cbind", trees[, 1])
+  
+  # calculate the final fit as a mean of all regression trees
+  rf_fit <- apply(fits, MARGIN = 1, mean, na.rm = TRUE)
+  
+  # extract the feature importance
+  imp_full <- do.call("rbind", trees[, 2])
+  
+  # build the mean feature importance between all trees
+  imp <- aggregate(IMPORTANCE ~ FEATURES, FUN = mean, imp_full)
+  
+  # build the ratio for interpretation purposes
+  imp$IMPORTANCE <- imp$IMPORTANCE / sum(imp$IMPORTANCE)
+  
+  # export
+  return(list(fit = rf_fit,
+              importance = imp[order(imp$IMPORTANCE, decreasing = TRUE), ],
+              imprf = imprf))
+}
